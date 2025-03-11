@@ -66,127 +66,6 @@ class HPCN(nn.Module):
         for i in range(layer_idx, -1, -1):
             current_rep = self.layers[i].predict(current_rep)
         return current_rep
-    
-    def train_unsupervised(self, dataloader, epochs=10, learning_rate=0.001, device='cpu'):
-        self.to(device)
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        losses = []
-        
-        for epoch in range(epochs):
-            epoch_loss = 0.0
-            with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
-                for batch_idx, (data, *_) in enumerate(pbar):
-                    data = data.to(device)
-                    optimizer.zero_grad()
-                    
-                    # Forward pass
-                    _, representations, errors = self.forward(data, return_all=True, return_errors=True)
-                    
-                    # Compute reconstruction loss
-                    input_prediction = self.predict_input(representations[-1])
-                    recon_loss = F.mse_loss(input_prediction, data)
-                    
-                    # Compute prediction errors
-                    error_loss = sum(torch.mean(error**2) for error in errors)
-                    
-                    # Total loss
-                    loss = recon_loss + 0.1 * error_loss
-                    
-                    loss.backward()
-                    optimizer.step()
-                    
-                    epoch_loss += loss.item()
-                    pbar.set_postfix({"loss": loss.item()})
-            
-            avg_epoch_loss = epoch_loss / len(dataloader)
-            losses.append(avg_epoch_loss)
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.6f}")
-        
-        return losses
-    
-    def train_supervised(self, dataloader, epochs=10, learning_rate=0.001, device='cpu'):
-        if not self.supervised:
-            raise ValueError("Model was not initialized for supervised learning")
-        
-        self.to(device)
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        criterion = nn.CrossEntropyLoss()
-        losses = []
-        
-        for epoch in range(epochs):
-            epoch_loss = 0.0
-            correct = 0
-            total = 0
-            
-            with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
-                for batch_idx, (data, targets) in enumerate(pbar):
-                    data, targets = data.to(device), targets.to(device)
-                    optimizer.zero_grad()
-                    
-                    outputs, representations, errors = self.forward(data, return_all=True, return_errors=True)
-                    task_loss = criterion(outputs, targets)
-                    error_loss = sum(torch.mean(error**2) for error in errors)
-                    loss = task_loss + 0.01 * error_loss
-                    
-                    loss.backward()
-                    optimizer.step()
-                    
-                    epoch_loss += loss.item()
-                    _, predicted = outputs.max(1)
-                    total += targets.size(0)
-                    correct += predicted.eq(targets).sum().item()
-                    
-                    pbar.set_postfix({
-                        "loss": loss.item(),
-                        "acc": 100. * correct / total
-                    })
-            
-            avg_epoch_loss = epoch_loss / len(dataloader)
-            losses.append(avg_epoch_loss)
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.6f}, Accuracy: {100. * correct / total:.2f}%")
-        
-        return losses
-    
-    def evaluate(self, dataloader, device='cpu'):
-        self.to(device)
-        self.eval()
-        
-        with torch.no_grad():
-            if self.supervised:
-                correct = 0
-                total = 0
-                
-                for data, targets in dataloader:
-                    data, targets = data.to(device), targets.to(device)
-                    outputs = self.forward(data)
-                    _, predicted = outputs.max(1)
-                    total += targets.size(0)
-                    correct += predicted.eq(targets).sum().item()
-                
-                accuracy = 100. * correct / total
-                return accuracy
-            else:
-                total_error = 0.0
-                
-                for data, *_ in dataloader:
-                    data = data.to(device)
-                    _, representations, _ = self.forward(data, return_all=True, return_errors=True)
-                    input_prediction = self.predict_input(representations[-1])
-                    error = F.mse_loss(input_prediction, data)
-                    total_error += error.item()
-                
-                avg_error = total_error / len(dataloader)
-                return avg_error
-    
-    def reconstruct(self, data, device='cpu'):
-        self.to(device)
-        self.eval()
-        
-        with torch.no_grad():
-            data = data.to(device)
-            _, representations, _ = self.forward(data, return_all=True, return_errors=True)
-            reconstructions = self.predict_input(representations[-1])
-            return reconstructions
 
 
 class HPCNWithTemporalDynamics(HPCN):
@@ -196,6 +75,7 @@ class HPCNWithTemporalDynamics(HPCN):
         super(HPCNWithTemporalDynamics, self).__init__(layers, supervised, output_size)
         self.temporal_window = temporal_window
         self.temporal_memory = None
+        self.current_batch_size = None
     
     def _init_temporal_memory(self, batch_size, device):
         """Initialize temporal memory for each layer"""
@@ -208,23 +88,36 @@ class HPCNWithTemporalDynamics(HPCN):
                 device=device
             )
             self.temporal_memory.append(memory)
+        self.current_batch_size = batch_size
     
     def _update_temporal_memory(self, layer_idx, new_state):
         """Update temporal memory for a specific layer"""
+        # Check if batch size has changed
+        if new_state.shape[0] != self.current_batch_size:
+            self._init_temporal_memory(new_state.shape[0], new_state.device)
+        
         # Shift memory contents
         self.temporal_memory[layer_idx] = torch.roll(self.temporal_memory[layer_idx], shifts=1, dims=1)
         # Update most recent state
         self.temporal_memory[layer_idx][:, 0] = new_state
     
+    def reset_temporal_memory(self):
+        """Reset temporal memory"""
+        self.temporal_memory = None
+        self.current_batch_size = None
+    
     def forward(self, x, return_all=False, return_errors=False):
         """Forward pass with temporal dynamics"""
         # Handle both 2D and 3D inputs
         if len(x.shape) == 2:
-            # Single time step: [batch_size, features]
             x = x.unsqueeze(1)  # Add time dimension: [batch_size, 1, features]
         
         batch_size, seq_length, features = x.shape
         device = x.device
+        
+        # Reset temporal memory if batch size changed
+        if self.current_batch_size != batch_size:
+            self.reset_temporal_memory()
         
         # Initialize temporal memory if needed
         if self.temporal_memory is None:
@@ -296,7 +189,6 @@ class HPCNWithTemporalDynamics(HPCN):
     def predict_input(self, representation, layer_idx=-1):
         """Predict input from representation, handling temporal sequences"""
         if isinstance(representation, list):
-            # Convert list of tensors to single tensor
             representation = torch.stack(representation, dim=1)
         
         # If representation is 3D [batch_size, seq_length, hidden_size]
@@ -324,6 +216,9 @@ class HPCNWithTemporalDynamics(HPCN):
         
         for epoch in range(epochs):
             epoch_loss = 0.0
+            # Reset temporal memory at the start of each epoch
+            self.reset_temporal_memory()
+            
             with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
                 for batch_idx, (data, *_) in enumerate(pbar):
                     data = data.to(device)
@@ -354,12 +249,44 @@ class HPCNWithTemporalDynamics(HPCN):
         
         return losses
     
+    def evaluate(self, dataloader, device='cpu'):
+        """Evaluate with temporal dynamics"""
+        self.to(device)
+        self.eval()
+        
+        with torch.no_grad():
+            total_error = 0.0
+            num_batches = 0
+            
+            # Reset temporal memory before evaluation
+            self.reset_temporal_memory()
+            
+            for data, *_ in dataloader:
+                data = data.to(device)
+                if len(data.shape) == 2:
+                    data = data.unsqueeze(1)
+                
+                # Forward pass
+                _, representations, _ = self.forward(data, return_all=True, return_errors=True)
+                
+                # Compute reconstruction error
+                input_prediction = self.predict_input(representations)
+                error = F.mse_loss(input_prediction, data, reduction='mean')
+                total_error += error.item()
+                num_batches += 1
+            
+            avg_error = total_error / num_batches
+            return avg_error
+    
     def reconstruct(self, data, device='cpu'):
         """Reconstruct temporal sequence"""
         self.to(device)
         self.eval()
         
         with torch.no_grad():
+            # Reset temporal memory before reconstruction
+            self.reset_temporal_memory()
+            
             data = data.to(device)
             if len(data.shape) == 2:
                 data = data.unsqueeze(1)
