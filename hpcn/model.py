@@ -277,20 +277,82 @@ class HPCNWithTemporalDynamics(HPCN):
             
             # Store results
             all_outputs.append(output_t)
-            all_representations.append(representations_t)
             if return_errors:
                 all_errors.append(errors_t)
+            all_representations.append(representations_t[-1])  # Only store the last layer's representation
         
-        # Stack outputs along time dimension
-        outputs = torch.stack(all_outputs, dim=1)
+        # Stack outputs and representations along time dimension
+        outputs = torch.stack(all_outputs, dim=1)  # [batch_size, seq_length, output_size]
+        representations = torch.stack(all_representations, dim=1)  # [batch_size, seq_length, hidden_size]
         
         # Return based on flags
         if return_all and return_errors:
-            return outputs, all_representations, all_errors
+            return outputs, representations, all_errors
         elif return_all:
-            return outputs, all_representations
+            return outputs, representations
         else:
             return outputs
+    
+    def predict_input(self, representation, layer_idx=-1):
+        """Predict input from representation, handling temporal sequences"""
+        if isinstance(representation, list):
+            # Convert list of tensors to single tensor
+            representation = torch.stack(representation, dim=1)
+        
+        # If representation is 3D [batch_size, seq_length, hidden_size]
+        if len(representation.shape) == 3:
+            batch_size, seq_length, hidden_size = representation.shape
+            
+            # Process each time step
+            predictions = []
+            for t in range(seq_length):
+                rep_t = representation[:, t]  # [batch_size, hidden_size]
+                pred_t = super().predict_input(rep_t, layer_idx)
+                predictions.append(pred_t)
+            
+            # Stack predictions along time dimension
+            return torch.stack(predictions, dim=1)  # [batch_size, seq_length, input_size]
+        else:
+            # Handle single time step
+            return super().predict_input(representation, layer_idx)
+    
+    def train_unsupervised(self, dataloader, epochs=10, learning_rate=0.001, device='cpu'):
+        """Train with temporal dynamics"""
+        self.to(device)
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        losses = []
+        
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
+                for batch_idx, (data, *_) in enumerate(pbar):
+                    data = data.to(device)
+                    optimizer.zero_grad()
+                    
+                    # Forward pass
+                    _, representations, errors = self.forward(data, return_all=True, return_errors=True)
+                    
+                    # Compute reconstruction loss
+                    input_prediction = self.predict_input(representations)
+                    recon_loss = F.mse_loss(input_prediction, data)
+                    
+                    # Compute prediction errors
+                    error_loss = sum(sum(torch.mean(error**2) for error in errors_t) for errors_t in errors)
+                    
+                    # Total loss
+                    loss = recon_loss + 0.1 * error_loss
+                    
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    pbar.set_postfix({"loss": loss.item()})
+            
+            avg_epoch_loss = epoch_loss / len(dataloader)
+            losses.append(avg_epoch_loss)
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.6f}")
+        
+        return losses
     
     def reconstruct(self, data, device='cpu'):
         """Reconstruct temporal sequence"""
@@ -303,12 +365,5 @@ class HPCNWithTemporalDynamics(HPCN):
                 data = data.unsqueeze(1)
             
             outputs, representations, _ = self.forward(data, return_all=True, return_errors=True)
-            
-            # Reconstruct each timestep
-            reconstructions = []
-            for t in range(data.shape[1]):
-                reconstruction_t = self.predict_input(outputs[:, t])
-                reconstructions.append(reconstruction_t)
-            
-            reconstructions = torch.stack(reconstructions, dim=1)
+            reconstructions = self.predict_input(representations)
             return reconstructions
