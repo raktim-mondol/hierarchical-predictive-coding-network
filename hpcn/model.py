@@ -18,52 +18,24 @@ from .layers import PCLayer
 
 
 class HPCN(nn.Module):
-    """
-    Hierarchical Predictive Coding Network
-    
-    A neural network model based on the predictive coding theory from neuroscience,
-    consisting of multiple predictive coding layers organized in a hierarchy.
-    
-    Args:
-        layers (list): List of PCLayer instances
-        supervised (bool, optional): Whether to use supervised learning. Defaults to False.
-        output_size (int, optional): Size of the output layer for supervised learning. Defaults to None.
-    """
+    """Base HPCN implementation"""
     
     def __init__(self, layers, supervised=False, output_size=None):
         super(HPCN, self).__init__()
-        
         self.layers = nn.ModuleList(layers)
         self.supervised = supervised
-        
-        # Add output layer for supervised learning
         if supervised and output_size is not None:
             self.output_layer = nn.Linear(layers[-1].hidden_size, output_size)
             nn.init.xavier_normal_(self.output_layer.weight)
-        
+    
     def forward(self, x, return_all=False, return_errors=False):
-        """
-        Forward pass through the HPCN
-        
-        Args:
-            x (torch.Tensor): Input tensor
-            return_all (bool, optional): Whether to return all layer representations. Defaults to False.
-            return_errors (bool, optional): Whether to return prediction errors. Defaults to False.
-            
-        Returns:
-            torch.Tensor or tuple: Output tensor or tuple of (outputs, representations, errors)
-        """
         batch_size = x.shape[0]
-        
-        # Initialize lists to store representations and errors
         representations = []
         predictions = []
         errors = []
         
-        # Forward pass through each layer
         current_input = x
         for i, layer in enumerate(self.layers):
-            # Forward pass through the layer
             if return_errors:
                 rep, pred, err = layer(current_input, None, return_errors=True)
                 representations.append(rep)
@@ -72,17 +44,13 @@ class HPCN(nn.Module):
             else:
                 rep = layer(current_input, None, return_errors=False)
                 representations.append(rep)
-            
-            # Update input for the next layer
             current_input = rep
         
-        # Output for supervised learning
         if self.supervised:
             output = self.output_layer(representations[-1])
         else:
             output = representations[-1]
         
-        # Return based on flags
         if return_all and return_errors:
             return output, representations, errors
         elif return_all:
@@ -91,79 +59,45 @@ class HPCN(nn.Module):
             return output
     
     def predict_input(self, representation=None, layer_idx=-1):
-        """
-        Generate a prediction of the input given a representation
-        
-        Args:
-            representation (torch.Tensor, optional): Representation tensor. If None, uses the
-                                                    representation from the last forward pass.
-            layer_idx (int, optional): Index of the layer to start prediction from. Defaults to -1.
-            
-        Returns:
-            torch.Tensor: Prediction of the input
-        """
         if representation is None:
             raise ValueError("Representation must be provided")
         
-        # Start from the specified layer
         current_rep = representation
-        
-        # Generate predictions layer by layer, from top to bottom
         for i in range(layer_idx, -1, -1):
             current_rep = self.layers[i].predict(current_rep)
-        
         return current_rep
     
     def train_unsupervised(self, dataloader, epochs=10, learning_rate=0.001, device='cpu'):
-        """
-        Train the HPCN in an unsupervised manner
-        
-        Args:
-            dataloader (DataLoader): DataLoader for the training data
-            epochs (int, optional): Number of training epochs. Defaults to 10.
-            learning_rate (float, optional): Learning rate for the optimizer. Defaults to 0.001.
-            device (str, optional): Device to train on. Defaults to 'cpu'.
-            
-        Returns:
-            list: Training losses
-        """
         self.to(device)
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        
         losses = []
         
         for epoch in range(epochs):
             epoch_loss = 0.0
-            
             with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
                 for batch_idx, (data, *_) in enumerate(pbar):
                     data = data.to(device)
+                    optimizer.zero_grad()
                     
                     # Forward pass
                     _, representations, errors = self.forward(data, return_all=True, return_errors=True)
                     
-                    # Compute reconstruction loss (prediction error at the input level)
+                    # Compute reconstruction loss
                     input_prediction = self.predict_input(representations[-1])
                     recon_loss = F.mse_loss(input_prediction, data)
                     
-                    # Compute prediction errors at each layer
-                    error_loss = 0.0
-                    for error in errors:
-                        error_loss += torch.mean(error**2)
+                    # Compute prediction errors
+                    error_loss = sum(torch.mean(error**2) for error in errors)
                     
                     # Total loss
                     loss = recon_loss + 0.1 * error_loss
                     
-                    # Backward pass and optimization
-                    optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
                     
-                    # Update statistics
                     epoch_loss += loss.item()
                     pbar.set_postfix({"loss": loss.item()})
             
-            # Average loss for the epoch
             avg_epoch_loss = epoch_loss / len(dataloader)
             losses.append(avg_epoch_loss)
             print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.6f}")
@@ -171,25 +105,12 @@ class HPCN(nn.Module):
         return losses
     
     def train_supervised(self, dataloader, epochs=10, learning_rate=0.001, device='cpu'):
-        """
-        Train the HPCN in a supervised manner
-        
-        Args:
-            dataloader (DataLoader): DataLoader for the training data
-            epochs (int, optional): Number of training epochs. Defaults to 10.
-            learning_rate (float, optional): Learning rate for the optimizer. Defaults to 0.001.
-            device (str, optional): Device to train on. Defaults to 'cpu'.
-            
-        Returns:
-            list: Training losses
-        """
         if not self.supervised:
             raise ValueError("Model was not initialized for supervised learning")
         
         self.to(device)
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
-        
         losses = []
         
         for epoch in range(epochs):
@@ -200,27 +121,16 @@ class HPCN(nn.Module):
             with tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}") as pbar:
                 for batch_idx, (data, targets) in enumerate(pbar):
                     data, targets = data.to(device), targets.to(device)
+                    optimizer.zero_grad()
                     
-                    # Forward pass
                     outputs, representations, errors = self.forward(data, return_all=True, return_errors=True)
-                    
-                    # Compute task loss (classification)
                     task_loss = criterion(outputs, targets)
-                    
-                    # Compute prediction errors at each layer
-                    error_loss = 0.0
-                    for error in errors:
-                        error_loss += torch.mean(error**2)
-                    
-                    # Total loss (weighted sum of task loss and prediction errors)
+                    error_loss = sum(torch.mean(error**2) for error in errors)
                     loss = task_loss + 0.01 * error_loss
                     
-                    # Backward pass and optimization
-                    optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
                     
-                    # Update statistics
                     epoch_loss += loss.item()
                     _, predicted = outputs.max(1)
                     total += targets.size(0)
@@ -231,7 +141,6 @@ class HPCN(nn.Module):
                         "acc": 100. * correct / total
                     })
             
-            # Average loss for the epoch
             avg_epoch_loss = epoch_loss / len(dataloader)
             losses.append(avg_epoch_loss)
             print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.6f}, Accuracy: {100. * correct / total:.2f}%")
@@ -239,16 +148,6 @@ class HPCN(nn.Module):
         return losses
     
     def evaluate(self, dataloader, device='cpu'):
-        """
-        Evaluate the HPCN on a test dataset
-        
-        Args:
-            dataloader (DataLoader): DataLoader for the test data
-            device (str, optional): Device to evaluate on. Defaults to 'cpu'.
-            
-        Returns:
-            float: Accuracy (for supervised) or reconstruction error (for unsupervised)
-        """
         self.to(device)
         self.eval()
         
@@ -259,11 +158,7 @@ class HPCN(nn.Module):
                 
                 for data, targets in dataloader:
                     data, targets = data.to(device), targets.to(device)
-                    
-                    # Forward pass
                     outputs = self.forward(data)
-                    
-                    # Compute accuracy
                     _, predicted = outputs.max(1)
                     total += targets.size(0)
                     correct += predicted.eq(targets).sum().item()
@@ -275,110 +170,93 @@ class HPCN(nn.Module):
                 
                 for data, *_ in dataloader:
                     data = data.to(device)
-                    
-                    # Forward pass with return_errors=True to ensure proper prediction
                     _, representations, _ = self.forward(data, return_all=True, return_errors=True)
-                    
-                    # Compute reconstruction error
                     input_prediction = self.predict_input(representations[-1])
                     error = F.mse_loss(input_prediction, data)
                     total_error += error.item()
                 
                 avg_error = total_error / len(dataloader)
                 return avg_error
-        
+    
     def reconstruct(self, data, device='cpu'):
-        """
-        Reconstruct input data
-        
-        Args:
-            data (torch.Tensor): Input data
-            device (str, optional): Device to use. Defaults to 'cpu'.
-            
-        Returns:
-            torch.Tensor: Reconstructed data
-        """
         self.to(device)
         self.eval()
         
         with torch.no_grad():
             data = data.to(device)
-            
-            # Forward pass with return_errors=True to ensure proper prediction
             _, representations, _ = self.forward(data, return_all=True, return_errors=True)
-            
-            # Reconstruct input
             reconstructions = self.predict_input(representations[-1])
-            
             return reconstructions
 
 
 class HPCNWithTemporalDynamics(HPCN):
-    """
-    HPCN with Temporal Dynamics
-    
-    An extension of the HPCN that incorporates temporal dynamics, making it suitable
-    for processing sequential data like video or time series.
-    
-    Args:
-        layers (list): List of PCLayer instances
-        supervised (bool, optional): Whether to use supervised learning. Defaults to False.
-        output_size (int, optional): Size of the output layer for supervised learning. Defaults to None.
-        temporal_window (int, optional): Size of the temporal window. Defaults to 5.
-    """
+    """HPCN with Temporal Dynamics"""
     
     def __init__(self, layers, supervised=False, output_size=None, temporal_window=5):
         super(HPCNWithTemporalDynamics, self).__init__(layers, supervised, output_size)
-        
         self.temporal_window = temporal_window
-        
-        # Initialize temporal memory
         self.temporal_memory = None
     
+    def _init_temporal_memory(self, batch_size, device):
+        """Initialize temporal memory for each layer"""
+        self.temporal_memory = []
+        for layer in self.layers:
+            memory = torch.zeros(
+                batch_size,
+                self.temporal_window,
+                layer.hidden_size,
+                device=device
+            )
+            self.temporal_memory.append(memory)
+    
+    def _update_temporal_memory(self, layer_idx, new_state):
+        """Update temporal memory for a specific layer"""
+        # Shift memory contents
+        self.temporal_memory[layer_idx] = torch.roll(self.temporal_memory[layer_idx], shifts=1, dims=1)
+        # Update most recent state
+        self.temporal_memory[layer_idx][:, 0] = new_state
+    
     def forward(self, x, return_all=False, return_errors=False):
-        """
-        Forward pass through the HPCN with temporal dynamics
+        """Forward pass with temporal dynamics"""
+        # Handle both 2D and 3D inputs
+        if len(x.shape) == 2:
+            # Single time step: [batch_size, features]
+            x = x.unsqueeze(1)  # Add time dimension: [batch_size, 1, features]
         
-        Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, sequence_length, features]
-            return_all (bool, optional): Whether to return all layer representations. Defaults to False.
-            return_errors (bool, optional): Whether to return prediction errors. Defaults to False.
-            
-        Returns:
-            torch.Tensor or tuple: Output tensor or tuple of (outputs, representations, errors)
-        """
-        batch_size, seq_length, num_features = x.shape
+        batch_size, seq_length, features = x.shape
+        device = x.device
         
-        # Initialize lists to store representations and errors for each time step
-        all_representations = []
-        all_errors = []
-        all_outputs = []
-        
-        # Initialize or reset temporal memory
+        # Initialize temporal memory if needed
         if self.temporal_memory is None:
-            self.temporal_memory = [torch.zeros(batch_size, self.temporal_window, layer.hidden_size, 
-                                              device=x.device) for layer in self.layers]
+            self._init_temporal_memory(batch_size, device)
         
         # Process each time step
+        all_outputs = []
+        all_representations = []
+        all_errors = []
+        
         for t in range(seq_length):
-            # Get input for current time step
-            x_t = x[:, t]  # Shape: [batch_size, num_features]
+            x_t = x[:, t]  # [batch_size, features]
             
-            # Initialize lists for current time step
+            # Lists for current timestep
             representations_t = []
             errors_t = []
             
-            # Forward pass through each layer
+            # Forward through layers
             current_input = x_t
             for i, layer in enumerate(self.layers):
                 # Get temporal context
-                if t >= self.temporal_window:
-                    context = self.temporal_memory[i][:, :(self.temporal_window-1)]
-                    self.temporal_memory[i][:, 1:] = context
-                    context_mean = torch.mean(context, dim=1)
-                    current_input = current_input + 0.1 * context_mean
+                if t >= 1 or self.temporal_memory[i][:, 0].sum() != 0:
+                    # Compute temporal context as weighted average of past states
+                    weights = torch.arange(self.temporal_window, 0, -1, device=device)
+                    weights = F.softmax(weights.float(), dim=0)
+                    context = torch.sum(self.temporal_memory[i] * weights.view(1, -1, 1), dim=1)
+                    
+                    # Ensure dimensions match before adding
+                    if context.shape == current_input.shape:
+                        current_input = current_input + 0.1 * context
                 
-                # Forward pass through the layer
+                # Layer forward pass
                 if return_errors:
                     rep, pred, err = layer(current_input, None, return_errors=True)
                     representations_t.append(rep)
@@ -387,26 +265,24 @@ class HPCNWithTemporalDynamics(HPCN):
                     rep = layer(current_input, None, return_errors=False)
                     representations_t.append(rep)
                 
-                # Update input for the next layer
+                # Update temporal memory and prepare next layer input
+                self._update_temporal_memory(i, rep.detach())
                 current_input = rep
-                
-                # Update temporal memory
-                self.temporal_memory[i][:, 0] = rep
             
-            # Output for supervised learning
+            # Handle output
             if self.supervised:
                 output_t = self.output_layer(representations_t[-1])
             else:
                 output_t = representations_t[-1]
             
-            # Store results for this time step
+            # Store results
+            all_outputs.append(output_t)
             all_representations.append(representations_t)
             if return_errors:
                 all_errors.append(errors_t)
-            all_outputs.append(output_t)
         
         # Stack outputs along time dimension
-        outputs = torch.stack(all_outputs, dim=1)  # Shape: [batch_size, seq_length, output_size]
+        outputs = torch.stack(all_outputs, dim=1)
         
         # Return based on flags
         if return_all and return_errors:
@@ -415,34 +291,24 @@ class HPCNWithTemporalDynamics(HPCN):
             return outputs, all_representations
         else:
             return outputs
-            
+    
     def reconstruct(self, data, device='cpu'):
-        """
-        Reconstruct input data
-        
-        Args:
-            data (torch.Tensor): Input data of shape [batch_size, sequence_length, features]
-            device (str, optional): Device to use. Defaults to 'cpu'.
-            
-        Returns:
-            torch.Tensor: Reconstructed data of same shape as input
-        """
+        """Reconstruct temporal sequence"""
         self.to(device)
         self.eval()
         
         with torch.no_grad():
             data = data.to(device)
+            if len(data.shape) == 2:
+                data = data.unsqueeze(1)
             
-            # Forward pass
             outputs, representations, _ = self.forward(data, return_all=True, return_errors=True)
             
-            # Reconstruct each time step
+            # Reconstruct each timestep
             reconstructions = []
             for t in range(data.shape[1]):
                 reconstruction_t = self.predict_input(outputs[:, t])
                 reconstructions.append(reconstruction_t)
             
-            # Stack reconstructions along time dimension
             reconstructions = torch.stack(reconstructions, dim=1)
-            
             return reconstructions
