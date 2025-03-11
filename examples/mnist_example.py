@@ -75,19 +75,31 @@ def create_model(model_type='standard', supervised=False):
         layers = [
             PCLayer(input_size=input_size, hidden_size=400),
             PCLayer(input_size=400, hidden_size=200),
-            PCLayer(input_size=200, hidden_size=100)
+            PCLayer(input_size=200, hidden_size=100),
+            # Decoder layers
+            PCLayer(input_size=100, hidden_size=200),
+            PCLayer(input_size=200, hidden_size=400),
+            PCLayer(input_size=400, hidden_size=input_size)
         ]
     elif model_type == 'error_units':
         layers = [
             PCLayerWithErrorUnits(input_size=input_size, hidden_size=400),
             PCLayerWithErrorUnits(input_size=400, hidden_size=200),
-            PCLayerWithErrorUnits(input_size=200, hidden_size=100)
+            PCLayerWithErrorUnits(input_size=200, hidden_size=100),
+            # Decoder layers
+            PCLayerWithErrorUnits(input_size=100, hidden_size=200),
+            PCLayerWithErrorUnits(input_size=200, hidden_size=400),
+            PCLayerWithErrorUnits(input_size=400, hidden_size=input_size)
         ]
     elif model_type == 'hebbian':
         layers = [
             LocalHebbianPCLayer(input_size=input_size, hidden_size=400),
             LocalHebbianPCLayer(input_size=400, hidden_size=200),
-            LocalHebbianPCLayer(input_size=200, hidden_size=100)
+            LocalHebbianPCLayer(input_size=200, hidden_size=100),
+            # Decoder layers
+            LocalHebbianPCLayer(input_size=100, hidden_size=200),
+            LocalHebbianPCLayer(input_size=200, hidden_size=400),
+            LocalHebbianPCLayer(input_size=400, hidden_size=input_size)
         ]
     else:
         raise ValueError(f"Unknown model type: {model_type}")
