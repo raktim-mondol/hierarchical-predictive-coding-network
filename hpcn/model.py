@@ -139,10 +139,6 @@ class HPCN(nn.Module):
                 for batch_idx, (data, *_) in enumerate(pbar):
                     data = data.to(device)
                     
-                    # Flatten the data if needed
-                    if len(data.shape) > 2:
-                        data = data.reshape(data.shape[0], -1)
-                    
                     # Forward pass
                     _, representations, errors = self.forward(data, return_all=True, return_errors=True)
                     
@@ -205,10 +201,6 @@ class HPCN(nn.Module):
                 for batch_idx, (data, targets) in enumerate(pbar):
                     data, targets = data.to(device), targets.to(device)
                     
-                    # Flatten the data if needed
-                    if len(data.shape) > 2:
-                        data = data.reshape(data.shape[0], -1)
-                    
                     # Forward pass
                     outputs, representations, errors = self.forward(data, return_all=True, return_errors=True)
                     
@@ -268,10 +260,6 @@ class HPCN(nn.Module):
                 for data, targets in dataloader:
                     data, targets = data.to(device), targets.to(device)
                     
-                    # Flatten the data if needed
-                    if len(data.shape) > 2:
-                        data = data.reshape(data.shape[0], -1)
-                    
                     # Forward pass
                     outputs = self.forward(data)
                     
@@ -287,10 +275,6 @@ class HPCN(nn.Module):
                 
                 for data, *_ in dataloader:
                     data = data.to(device)
-                    
-                    # Flatten the data if needed
-                    if len(data.shape) > 2:
-                        data = data.reshape(data.shape[0], -1)
                     
                     # Forward pass with return_errors=True to ensure proper prediction
                     _, representations, _ = self.forward(data, return_all=True, return_errors=True)
@@ -320,22 +304,11 @@ class HPCN(nn.Module):
         with torch.no_grad():
             data = data.to(device)
             
-            # Flatten the data if needed
-            if len(data.shape) > 2:
-                original_shape = data.shape
-                data = data.reshape(data.shape[0], -1)
-            else:
-                original_shape = None
-            
             # Forward pass with return_errors=True to ensure proper prediction
             _, representations, _ = self.forward(data, return_all=True, return_errors=True)
             
             # Reconstruct input
             reconstructions = self.predict_input(representations[-1])
-            
-            # Reshape back to original shape if needed
-            if original_shape is not None:
-                reconstructions = reconstructions.reshape(original_shape)
             
             return reconstructions
 
@@ -367,38 +340,29 @@ class HPCNWithTemporalDynamics(HPCN):
         Forward pass through the HPCN with temporal dynamics
         
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, sequence_length, ...]
+            x (torch.Tensor): Input tensor of shape [batch_size, sequence_length, features]
             return_all (bool, optional): Whether to return all layer representations. Defaults to False.
             return_errors (bool, optional): Whether to return prediction errors. Defaults to False.
             
         Returns:
             torch.Tensor or tuple: Output tensor or tuple of (outputs, representations, errors)
         """
-        batch_size = x.shape[0]
-        seq_length = x.shape[1] if len(x.shape) > 2 else 1
-        
-        # Reshape input if it's a single time step
-        if len(x.shape) == 2:
-            x = x.unsqueeze(1)
+        batch_size, seq_length, num_features = x.shape
         
         # Initialize lists to store representations and errors for each time step
         all_representations = []
         all_errors = []
         all_outputs = []
         
-        # Initialize or reset temporal memory if sequence length has changed
-        if self.temporal_memory is None or self.temporal_memory[0].shape[1] != seq_length:
-            self.temporal_memory = [torch.zeros(batch_size, seq_length, layer.hidden_size, 
+        # Initialize or reset temporal memory
+        if self.temporal_memory is None:
+            self.temporal_memory = [torch.zeros(batch_size, self.temporal_window, layer.hidden_size, 
                                               device=x.device) for layer in self.layers]
         
         # Process each time step
         for t in range(seq_length):
             # Get input for current time step
-            x_t = x[:, t]
-            
-            # Flatten if needed
-            if len(x_t.shape) > 2:
-                x_t = x_t.reshape(x_t.shape[0], -1)
+            x_t = x[:, t]  # Shape: [batch_size, num_features]
             
             # Initialize lists for current time step
             representations_t = []
@@ -407,17 +371,16 @@ class HPCNWithTemporalDynamics(HPCN):
             # Forward pass through each layer
             current_input = x_t
             for i, layer in enumerate(self.layers):
-                # Get temporal context from memory
-                temporal_context = self.temporal_memory[i][:, max(0, t-self.temporal_window):t]
-                
-                # Combine current input with temporal context
-                if t > 0:
-                    context_mean = torch.mean(temporal_context, dim=1)
+                # Get temporal context
+                if t >= self.temporal_window:
+                    context = self.temporal_memory[i][:, :(self.temporal_window-1)]
+                    self.temporal_memory[i][:, 1:] = context
+                    context_mean = torch.mean(context, dim=1)
                     current_input = current_input + 0.1 * context_mean
                 
                 # Forward pass through the layer
                 if return_errors:
-                    rep, _, err = layer(current_input, None, return_errors=True)
+                    rep, pred, err = layer(current_input, None, return_errors=True)
                     representations_t.append(rep)
                     errors_t.append(err)
                 else:
@@ -428,7 +391,7 @@ class HPCNWithTemporalDynamics(HPCN):
                 current_input = rep
                 
                 # Update temporal memory
-                self.temporal_memory[i][:, t] = rep
+                self.temporal_memory[i][:, 0] = rep
             
             # Output for supervised learning
             if self.supervised:
@@ -443,7 +406,7 @@ class HPCNWithTemporalDynamics(HPCN):
             all_outputs.append(output_t)
         
         # Stack outputs along time dimension
-        outputs = torch.stack(all_outputs, dim=1)
+        outputs = torch.stack(all_outputs, dim=1)  # Shape: [batch_size, seq_length, output_size]
         
         # Return based on flags
         if return_all and return_errors:
@@ -452,3 +415,34 @@ class HPCNWithTemporalDynamics(HPCN):
             return outputs, all_representations
         else:
             return outputs
+            
+    def reconstruct(self, data, device='cpu'):
+        """
+        Reconstruct input data
+        
+        Args:
+            data (torch.Tensor): Input data of shape [batch_size, sequence_length, features]
+            device (str, optional): Device to use. Defaults to 'cpu'.
+            
+        Returns:
+            torch.Tensor: Reconstructed data of same shape as input
+        """
+        self.to(device)
+        self.eval()
+        
+        with torch.no_grad():
+            data = data.to(device)
+            
+            # Forward pass
+            outputs, representations, _ = self.forward(data, return_all=True, return_errors=True)
+            
+            # Reconstruct each time step
+            reconstructions = []
+            for t in range(data.shape[1]):
+                reconstruction_t = self.predict_input(outputs[:, t])
+                reconstructions.append(reconstruction_t)
+            
+            # Stack reconstructions along time dimension
+            reconstructions = torch.stack(reconstructions, dim=1)
+            
+            return reconstructions
