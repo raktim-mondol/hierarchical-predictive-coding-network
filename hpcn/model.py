@@ -63,17 +63,14 @@ class HPCN(nn.Module):
         # Forward pass through each layer
         current_input = x
         for i, layer in enumerate(self.layers):
-            # Get top-down prediction from the layer above (if not the top layer)
-            top_down = None if i == 0 else predictions[i-1]
-            
             # Forward pass through the layer
             if return_errors:
-                rep, pred, err = layer(current_input, top_down, return_errors=True)
+                rep, pred, err = layer(current_input, None, return_errors=True)
                 representations.append(rep)
                 predictions.append(pred)
                 errors.append(err)
             else:
-                rep = layer(current_input, top_down, return_errors=False)
+                rep = layer(current_input, None, return_errors=False)
                 representations.append(rep)
             
             # Update input for the next layer
@@ -295,8 +292,8 @@ class HPCN(nn.Module):
                     if len(data.shape) > 2:
                         data = data.reshape(data.shape[0], -1)
                     
-                    # Forward pass
-                    representations = self.forward(data, return_all=True)[1]
+                    # Forward pass with return_errors=True to ensure proper prediction
+                    _, representations, _ = self.forward(data, return_all=True, return_errors=True)
                     
                     # Compute reconstruction error
                     input_prediction = self.predict_input(representations[-1])
@@ -330,8 +327,8 @@ class HPCN(nn.Module):
             else:
                 original_shape = None
             
-            # Forward pass
-            representations = self.forward(data, return_all=True)[1]
+            # Forward pass with return_errors=True to ensure proper prediction
+            _, representations, _ = self.forward(data, return_all=True, return_errors=True)
             
             # Reconstruct input
             reconstructions = self.predict_input(representations[-1])
@@ -341,112 +338,3 @@ class HPCN(nn.Module):
                 reconstructions = reconstructions.reshape(original_shape)
             
             return reconstructions
-
-
-class HPCNWithTemporalDynamics(HPCN):
-    """
-    HPCN with Temporal Dynamics
-    
-    An extension of the HPCN that incorporates temporal dynamics, making it suitable
-    for processing sequential data like video or time series.
-    
-    Args:
-        layers (list): List of PCLayer instances
-        supervised (bool, optional): Whether to use supervised learning. Defaults to False.
-        output_size (int, optional): Size of the output layer for supervised learning. Defaults to None.
-        temporal_window (int, optional): Size of the temporal window. Defaults to 5.
-    """
-    
-    def __init__(self, layers, supervised=False, output_size=None, temporal_window=5):
-        super(HPCNWithTemporalDynamics, self).__init__(layers, supervised, output_size)
-        
-        self.temporal_window = temporal_window
-        
-        # Initialize temporal memory
-        self.temporal_memory = None
-    
-    def forward(self, x, return_all=False, return_errors=False):
-        """
-        Forward pass through the HPCN with temporal dynamics
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, sequence_length, ...]
-            return_all (bool, optional): Whether to return all layer representations. Defaults to False.
-            return_errors (bool, optional): Whether to return prediction errors. Defaults to False.
-            
-        Returns:
-            torch.Tensor or tuple: Output tensor or tuple of (outputs, representations, errors)
-        """
-        batch_size, seq_length = x.shape[0], x.shape[1]
-        
-        # Initialize lists to store representations and errors for each time step
-        all_representations = []
-        all_errors = []
-        all_outputs = []
-        
-        # Initialize or reset temporal memory if sequence length has changed
-        if self.temporal_memory is None or self.temporal_memory[0].shape[1] != seq_length:
-            self.temporal_memory = [torch.zeros(batch_size, seq_length, layer.hidden_size, 
-                                              device=x.device) for layer in self.layers]
-        
-        # Process each time step
-        for t in range(seq_length):
-            # Get input for current time step
-            x_t = x[:, t]
-            
-            # Flatten if needed
-            if len(x_t.shape) > 2:
-                x_t = x_t.reshape(x_t.shape[0], -1)
-            
-            # Initialize lists for current time step
-            representations_t = []
-            errors_t = []
-            
-            # Forward pass through each layer
-            current_input = x_t
-            for i, layer in enumerate(self.layers):
-                # Get temporal context from memory
-                temporal_context = self.temporal_memory[i][:, max(0, t-self.temporal_window):t]
-                
-                # Combine current input with temporal context
-                if t > 0:
-                    context_mean = torch.mean(temporal_context, dim=1)
-                    current_input = current_input + 0.1 * context_mean
-                
-                # Forward pass through the layer
-                if return_errors:
-                    rep, _, err = layer(current_input, None, return_errors=True)
-                    representations_t.append(rep)
-                    errors_t.append(err)
-                else:
-                    rep = layer(current_input, None, return_errors=False)
-                    representations_t.append(rep)
-                
-                # Update input for the next layer
-                current_input = rep
-                
-                # Update temporal memory
-                self.temporal_memory[i][:, t] = rep
-            
-            # Output for supervised learning
-            if self.supervised:
-                output_t = self.output_layer(representations_t[-1])
-            else:
-                output_t = representations_t[-1]
-            
-            # Store results for this time step
-            all_representations.append(representations_t)
-            if return_errors:
-                all_errors.append(errors_t)
-            all_outputs.append(output_t)
-        
-        # Stack outputs along time dimension
-        outputs = torch.stack(all_outputs, dim=1)
-        
-        # Return based on flags
-        if return_all and return_errors:
-            return outputs, all_representations, all_errors
-        elif return_all:
-            return outputs, all_representations
-        else:
-            return outputs
