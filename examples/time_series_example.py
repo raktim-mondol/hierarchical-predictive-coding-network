@@ -53,9 +53,9 @@ def generate_synthetic_data(num_samples=1000, seq_length=50, num_features=5):
             square_signal + 0.1*noise,
             saw_signal + 0.1*noise,
             0.5*sin_signal + 0.5*cos_signal + 0.1*noise
-        ])
+        ]).T  # Shape: [seq_length, num_features]
         
-        data.append(sequence.T)  # Shape: [seq_length, num_features]
+        data.append(sequence)
     
     data = np.stack(data)  # Shape: [num_samples, seq_length, num_features]
     
@@ -202,7 +202,11 @@ def main():
     
     # Generate synthetic data
     print("Generating synthetic time series data...")
-    train_data, test_data = generate_synthetic_data()
+    train_data, test_data = generate_synthetic_data(
+        num_samples=1000,
+        seq_length=50,
+        num_features=5
+    )
     
     # Create data loaders
     train_loader, test_loader = create_data_loaders(
@@ -213,7 +217,7 @@ def main():
     print(f"Creating {args.model_type} model...")
     model = create_model(
         model_type=args.model_type,
-        input_size=train_data.shape[2],
+        input_size=train_data.shape[2],  # number of features
         temporal_window=args.temporal_window
     )
     
